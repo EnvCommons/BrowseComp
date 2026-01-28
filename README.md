@@ -1,4 +1,4 @@
-# BrowseComp - OpenReward Environment
+# BrowseComp - OpenReward Env
 
 OpenReward evaluation environment for **BrowseComp**, a web search reasoning benchmark from OpenAI's simple-evals.
 
