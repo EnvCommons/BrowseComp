@@ -16,7 +16,7 @@ else:
 
 
 # CSV file locations with fallback logic
-BROWSECOMP_CSV_PROD = ENV_PATH / "browsecomp" / "browse_comp_test_set.csv"
+BROWSECOMP_CSV_PROD = ENV_PATH / "browse_comp_test_set.csv"
 BROWSECOMP_CSV_LOCAL = Path(__file__).parent / "browse_comp_test_set.csv"
 
 # Try production path first, fall back to local
