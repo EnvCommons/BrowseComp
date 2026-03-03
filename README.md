@@ -41,7 +41,7 @@ This is a sparse reward environment with LLM-based grading:
 
 ## Data
 
-Data is sourced from [OpenAI's simple-evals](https://github.com/openai/simple-evals). Questions and answers are encrypted using per-task canary passwords (SHA256 + XOR) to prevent test set leakage. Data is stored on the OpenReward platform.
+Data is sourced from [OpenAI's BrowseComp benchmark](https://openai.com/index/browsecomp/). Data is stored on the OpenReward platform.
 
 ## Tools
 
@@ -59,10 +59,13 @@ Multi-turn. Agents can perform multiple web searches before submitting a final a
 
 | Model | Accuracy |
 |-------|----------|
-| GPT-4o (without browsing) | 0.9% |
-| GPT-4o (with browsing) | 2.5% |
+| Gemini 3.1 Pro (search, Python, browse) | 85.9% |
+| Claude Opus 4.6 | 84.0% |
+| Kimi K2.5 (agent swarm) | 78.4% |
+| MiniMax M2.5 | 76.3% |
+| GLM-5 (with ctx management) | 75.9% |
 
-This benchmark is intentionally difficult - even state-of-the-art models with web access achieve low scores.
+This benchmark requires persistent multi-hop web navigation to find hard-to-find, entangled information.
 
 ## Other Environment Requirements
 
@@ -78,10 +81,11 @@ Agents in BrowseComp perform web searches and answer research questions. The env
 ## Citation
 
 ```bibtex
-@misc{openai2024simpleevals,
-  title={Simple Evals},
-  author={OpenAI},
-  year={2024},
-  url={https://github.com/openai/simple-evals}
+@article{wei2025browsecomp,
+  title={BrowseComp: A Simple Yet Challenging Benchmark for Browsing Agents},
+  author={Wei, Jason and Sun, Zhiqing and Papay, Spencer and McKinney, Scott and Han, Jeffrey and Fulford, Isa and Chung, Hyung Won and Passos, Alex Tachard and Fedus, William and Glaese, Amelia},
+  journal={arXiv preprint arXiv:2504.12516},
+  year={2025},
+  url={https://arxiv.org/abs/2504.12516}
 }
 ```
