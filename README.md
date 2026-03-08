@@ -51,6 +51,8 @@ Data is sourced from [OpenAI's BrowseComp benchmark](https://openai.com/index/br
 | `fetch_url` | Fetch full content from a URL (truncated to 8000 chars) |
 | `submit_answer` | Submit answer with explanation, exact_answer, and confidence |
 
+Note that the `fetch_url` and `web_search` tools require Tavily, but are optional. If you want to use a different provider for search you can exclude these tools and use external tools instead.
+
 ## Time Horizon
 
 Multi-turn. Agents can perform multiple web searches before submitting a final answer.
