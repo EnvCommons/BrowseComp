@@ -10,9 +10,9 @@ import pandas as pd
 import openai
 from pydantic import BaseModel, Field
 from typing import Dict, List
-from tavily import AsyncTavilyClient
 
 from openreward.environments import Environment, JSONObject, Server, TextBlock, ToolOutput, tool
+from openreward.toolsets import WebToolset
 
 from decrypt import decrypt_task
 from constants import BROWSECOMP_CSV
@@ -47,16 +47,6 @@ class BrowseCompTaskSpec(BaseModel):
     id: str
     problem: str
     answer: str
-
-
-class WebSearchInput(BaseModel):
-    """Parameters for web_search tool"""
-    query: str = Field(..., description="Search query")
-
-
-class FetchUrlInput(BaseModel):
-    """Parameters for fetch_url tool"""
-    url: str = Field(..., description="URL to fetch")
 
 
 class SubmitAnswerParams(BaseModel):
@@ -138,13 +128,27 @@ class BrowseComp(Environment):
     5. Receives reward (1.0 correct, 0.0 incorrect) and feedback
     """
 
+    # web_search / web_fetch come from the SDK rather than being hand-rolled here.
+    # Which provider answers is process configuration (OPENREWARD_SEARCH_BACKEND,
+    # default "backsearch"), so changing search provider needs no change here.
+    #
+    # The toolset owns the error split too: an unfetchable page stays tool output
+    # the agent can act on, while a missing key or exhausted quota raises so the
+    # rollout ends with a blank reward rather than a score that reads as a bad answer.
+    toolsets = [WebToolset]
+
+    # Search hits keep their snippets, as the prompt promises. Off in the SDK by
+    # default, which would force a fetch per candidate just to triage results.
+    web_include_snippets = True
+
     def __init__(self, task_spec: JSONObject, secrets: dict[str, str] = {}) -> None:
         """
         Initialize BrowseComp environment instance.
 
         Args:
             task_spec: Task specification with id, problem, answer
-            secrets: Must contain "openai_api_key" for grading and "tavily_api_key" for search
+            secrets: Must contain "openai_api_key" for grading; search credentials
+                (api_key / tavily_api_key) are forwarded to the search backend
 
         Raises:
             ValueError: If required API keys missing or task_spec invalid
@@ -157,19 +161,16 @@ class BrowseComp(Environment):
         if not openai_api_key:
             raise ValueError(
                 "openai_api_key required in secrets parameter for LLM grading. "
-                "Pass secrets={'openai_api_key': 'sk-...', 'tavily_api_key': 'tvly-...'} when creating session."
+                "Pass secrets={'openai_api_key': 'sk-...'} when creating session."
             )
 
-        # Require Tavily API key for web search - fail fast if missing
-        tavily_api_key = secrets.get("tavily_api_key")
-        if not tavily_api_key:
-            print(
-                "Note: tavily_api_key required in secrets parameter for web search. "
-                "Pass secrets={'openai_api_key': 'sk-...', 'tavily_api_key': 'tvly-...'} when creating session."
-            )
+        # Read live by WebToolset on every tool call, so the search backend takes its
+        # credentials from the session rather than the server process. The configured
+        # backend picks the key it needs: `api_key` for backsearch, `tavily_api_key`
+        # for tavily. No up-front check — which key is required depends on the backend.
+        self.search_secrets = secrets
 
         self.openai_client = openai.AsyncClient(api_key=openai_api_key)
-        self.tavily_client = AsyncTavilyClient(api_key=tavily_api_key)
 
     @classmethod
     def list_splits(cls) -> list[str]:
@@ -218,7 +219,7 @@ Available Tools:
 1. web_search(query: str) - Search the web for information
    - Returns search results with titles, URLs, and snippets
    - You can search multiple times to gather information from different angles
-2. fetch_url(url: str) - Fetch full content from a specific URL
+2. web_fetch(url: str, prompt: str) - Fetch the content of a specific URL
    - Use this after web_search to read complete pages
    - Helpful for extracting detailed information
 3. submit_answer(...) - Submit your final answer (ends the episode)
@@ -227,7 +228,7 @@ Instructions:
 1. Use web_search to find relevant information
    - Consider searching for key entities, dates, or concepts mentioned in the question
    - Questions often require multi-hop reasoning across multiple searches
-2. Use fetch_url to get complete content from promising URLs
+2. Use web_fetch to get complete content from promising URLs
 3. When ready, use submit_answer with:
    - explanation: Your detailed reasoning and sources cited (2-4 sentences)
    - exact_answer: The precise, concise answer to the question
@@ -236,104 +237,6 @@ Instructions:
 Important: Questions in this benchmark are deliberately challenging and often require multi-hop reasoning. Take your time to research thoroughly before submitting."""
 
         return [TextBlock(type="text", text=prompt_text)]
-
-    @tool
-    async def web_search(self, params: WebSearchInput) -> ToolOutput:
-        """
-        Search the web using Tavily. Returns search results with titles, URLs, and snippets.
-        Use fetch_url tool to get full content from specific URLs if needed.
-        """
-        try:
-            # Use Tavily search API
-            response = await self.tavily_client.search(
-                query=params.query,
-                search_depth="basic",
-                max_results=5
-            )
-
-            # Format results
-            results = response.get("results", [])
-            if not results:
-                return ToolOutput(
-                    blocks=[TextBlock(type="text", text="No search results found.")],
-                    metadata={"query": params.query, "results": []},
-                    reward=0.0,
-                    finished=False
-                )
-
-            # Build display text
-            display_parts = [f"Search results for: {params.query}\n"]
-            for i, result in enumerate(results, 1):
-                title = result.get("title", "No title")
-                url = result.get("url", "")
-                snippet = result.get("content", "")
-                display_parts.append(f"{i}. {title}\n   URL: {url}\n   {snippet}\n")
-
-            display_text = "\n".join(display_parts)
-
-            return ToolOutput(
-                blocks=[TextBlock(type="text", text=display_text)],
-                metadata={
-                    "query": params.query,
-                    "results": results,
-                    "count": len(results)
-                },
-                reward=0.0,
-                finished=False
-            )
-        except Exception as e:
-            return ToolOutput(
-                blocks=[TextBlock(type="text", text=f"Web search failed: {str(e)}")],
-                metadata={"query": params.query, "error": str(e)},
-                reward=0.0,
-                finished=False
-            )
-
-    @tool
-    async def fetch_url(self, params: FetchUrlInput) -> ToolOutput:
-        """
-        Fetch and return the full text content from a specific URL using Tavily's extract method.
-        Use this after web_search to get complete information from a page.
-        """
-        try:
-            # Use Tavily's extract method
-            response = await self.tavily_client.extract(urls=[params.url])
-
-            # Get the extracted content
-            results = response.get("results", [])
-            if not results:
-                return ToolOutput(
-                    blocks=[TextBlock(type="text", text=f"No content extracted from {params.url}")],
-                    metadata={"url": params.url, "results": []},
-                    reward=0.0,
-                    finished=False
-                )
-
-            # Get the first result (we only passed one URL)
-            result = results[0]
-            raw_content = result.get("raw_content", "")
-
-            # Truncate if too long
-            max_length = 8000
-            if len(raw_content) > max_length:
-                raw_content = raw_content[:max_length] + "...\n[Content truncated]"
-
-            return ToolOutput(
-                blocks=[TextBlock(type="text", text=f"Content from {params.url}:\n\n{raw_content}")],
-                metadata={
-                    "url": params.url,
-                    "length": len(raw_content)
-                },
-                reward=0.0,
-                finished=False
-            )
-        except Exception as e:
-            return ToolOutput(
-                blocks=[TextBlock(type="text", text=f"Failed to fetch URL: {str(e)}")],
-                metadata={"url": params.url, "error": str(e)},
-                reward=0.0,
-                finished=False
-            )
 
     async def _grade_answer(
         self,
