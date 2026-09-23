@@ -4,7 +4,7 @@
 
 ## Description
 
-BrowseComp is an environment for evaluating web search reasoning capabilities. Based on OpenAI's [simple-evals](https://github.com/openai/simple-evals) benchmark, it contains 1,266 encrypted research questions that require multi-hop reasoning and cannot be answered without current web information. The environment provides built-in web search and URL fetching tools powered by OpenReward's backdated search corpus (backsearch), with the cutoff set to the UTC date each session starts.
+BrowseComp is an environment for evaluating web search reasoning capabilities. Based on OpenAI's [simple-evals](https://github.com/openai/simple-evals) benchmark, it contains 1,266 encrypted research questions that require multi-hop reasoning and cannot be answered without current web information. The environment provides built-in web search and URL fetching tools powered by OpenReward's backdated search corpus (backsearch), with the cutoff pinned to 2025-04-09, the day before BrowseComp's release, so search cannot surface answers published after it.
 
 ## Capabilities
 
@@ -47,7 +47,7 @@ Data is sourced from [OpenAI's BrowseComp benchmark](https://openai.com/index/br
 
 | Tool | Description |
 |------|-------------|
-| `web_search` | Search the backsearch corpus as of the session's start date (returns titles, URLs, snippets) |
+| `web_search` | Search the backsearch corpus as of 2025-04-09 (returns titles, URLs, snippets) |
 | `web_fetch` | Fetch an archived capture of a URL, extracting what the prompt asks for |
 | `submit_answer` | Submit answer with explanation, exact_answer, and confidence |
 

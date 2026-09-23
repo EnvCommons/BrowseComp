@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -11,15 +10,6 @@ from openreward.toolsets import BackSearchToolset
 from openreward.toolsets._web_common import WebFetchParams, WebSearchParams, to_tool_output
 from openreward.tools.web import FETCH_DESCRIPTION, SEARCH_DESCRIPTION, WebToolResult, run_fetch, run_search
 from openreward.web_service import WebServiceConfig
-
-
-def today_utc_iso() -> str:
-    """Today's date in UTC as ISO ``YYYY-MM-DD`` — the backsearch cutoff.
-
-    UTC rather than the server's local date so every replica of the env agrees
-    on the cutoff regardless of the timezone it happens to run in.
-    """
-    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _url_variants(url: str) -> list[str]:
@@ -122,7 +112,7 @@ class BrowseCompBackSearch(BackSearchToolset):
     ``metadata["content"]`` mirror is dropped (see ``_drop_content_mirror``).
 
     The cutoff still resolves through the parent's ``_current_as_of``
-    (``env.web_as_of``, the UTC date the session was created) on every call.
+    (``env.web_as_of``) on every call.
     No ``corpus`` is pinned, so the backend fans out over its default corpora
     (news, SEC filings, Wikipedia, general web, live captures, arXiv) — naming
     corpora *replaces* that set rather than extending it. Unlike the SDK's

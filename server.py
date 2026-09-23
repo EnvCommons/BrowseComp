@@ -13,7 +13,7 @@ from typing import Dict, List
 
 from openreward.environments import Environment, JSONObject, Server, TextBlock, ToolOutput, tool
 
-from backsearch import BrowseCompBackSearch, today_utc_iso
+from backsearch import BrowseCompBackSearch
 from decrypt import decrypt_task
 from constants import BROWSECOMP_CSV
 
@@ -122,14 +122,16 @@ class BrowseComp(Environment):
 
     Agent workflow:
     1. Receives a research question requiring web search
-    2. Uses web_search / web_fetch (backsearch, as of session start) to research
+    2. Uses web_search / web_fetch (backsearch, as of 2025-04-09) to research
     3. Submits answer with explanation, exact_answer, and confidence
     4. Answer is graded by gpt-5-mini comparing to correct answer
     5. Receives reward (1.0 correct, 0.0 incorrect) and feedback
     """
 
-    # Backdated backsearch, as in obscurefacts; cutoff (web_as_of) is set per session.
     toolsets = [BrowseCompBackSearch]
+
+    # Day before BrowseComp's release, so search can't surface published answers.
+    web_as_of = "2025-04-09"
 
     def __init__(self, task_spec: JSONObject, secrets: dict[str, str] = {}) -> None:
         """
@@ -156,9 +158,6 @@ class BrowseComp(Environment):
 
         # Session credentials for backsearch (`api_key` / `openreward_api_key`).
         self.search_secrets = secrets
-
-        # Backsearch cutoff: the UTC date this session was created.
-        self.web_as_of = today_utc_iso()
 
         self.openai_client = openai.AsyncClient(api_key=openai_api_key)
 
