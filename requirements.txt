@@ -1,5 +1,5 @@
 fastapi>=0.115.12
-openreward[search]>=0.1.153
+openreward>=0.1.158
 pandas
 openai
 pydantic

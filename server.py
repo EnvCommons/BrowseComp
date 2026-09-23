@@ -12,8 +12,8 @@ from pydantic import BaseModel, Field
 from typing import Dict, List
 
 from openreward.environments import Environment, JSONObject, Server, TextBlock, ToolOutput, tool
-from openreward.toolsets import WebToolset
 
+from backsearch import BrowseCompBackSearch
 from decrypt import decrypt_task
 from constants import BROWSECOMP_CSV
 
@@ -122,24 +122,16 @@ class BrowseComp(Environment):
 
     Agent workflow:
     1. Receives a research question requiring web search
-    2. Uses web_search tool (provided by client) to research
+    2. Uses web_search / web_fetch (backsearch, as of 2025-04-09) to research
     3. Submits answer with explanation, exact_answer, and confidence
     4. Answer is graded by gpt-5-mini comparing to correct answer
     5. Receives reward (1.0 correct, 0.0 incorrect) and feedback
     """
 
-    # web_search / web_fetch come from the SDK rather than being hand-rolled here.
-    # Which provider answers is process configuration (OPENREWARD_SEARCH_BACKEND,
-    # default "backsearch"), so changing search provider needs no change here.
-    #
-    # The toolset owns the error split too: an unfetchable page stays tool output
-    # the agent can act on, while a missing key or exhausted quota raises so the
-    # rollout ends with a blank reward rather than a score that reads as a bad answer.
-    toolsets = [WebToolset]
+    toolsets = [BrowseCompBackSearch]
 
-    # Search hits keep their snippets, as the prompt promises. Off in the SDK by
-    # default, which would force a fetch per candidate just to triage results.
-    web_include_snippets = True
+    # Day before BrowseComp's release, so search can't surface published answers.
+    web_as_of = "2025-04-09"
 
     def __init__(self, task_spec: JSONObject, secrets: dict[str, str] = {}) -> None:
         """
@@ -147,8 +139,8 @@ class BrowseComp(Environment):
 
         Args:
             task_spec: Task specification with id, problem, answer
-            secrets: Must contain "openai_api_key" for grading; search credentials
-                (api_key / tavily_api_key) are forwarded to the search backend
+            secrets: Must contain "openai_api_key" for grading; "api_key" is
+                forwarded to backsearch (falls back to OPENREWARD_API_KEY)
 
         Raises:
             ValueError: If required API keys missing or task_spec invalid
@@ -164,10 +156,7 @@ class BrowseComp(Environment):
                 "Pass secrets={'openai_api_key': 'sk-...'} when creating session."
             )
 
-        # Read live by WebToolset on every tool call, so the search backend takes its
-        # credentials from the session rather than the server process. The configured
-        # backend picks the key it needs: `api_key` for backsearch, `tavily_api_key`
-        # for tavily. No up-front check — which key is required depends on the backend.
+        # Session credentials for backsearch (`api_key` / `openreward_api_key`).
         self.search_secrets = secrets
 
         self.openai_client = openai.AsyncClient(api_key=openai_api_key)

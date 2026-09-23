@@ -28,8 +28,7 @@ async def main():
     ENV_NAME = "local/BrowseComp"
     SPLIT = "test"
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    # Optional: whichever the server's OPENREWARD_SEARCH_BACKEND needs.
-    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+    # Optional: backsearch key; the server falls back to its own OPENREWARD_API_KEY.
     OPENREWARD_API_KEY = os.getenv("OPENREWARD_API_KEY")
 
     if not OPENAI_API_KEY:
@@ -72,7 +71,6 @@ async def main():
         task=task,
         secrets={
             "openai_api_key": OPENAI_API_KEY,
-            **({"tavily_api_key": TAVILY_API_KEY} if TAVILY_API_KEY else {}),
             **({"api_key": OPENREWARD_API_KEY} if OPENREWARD_API_KEY else {}),
         }
     ) as session:

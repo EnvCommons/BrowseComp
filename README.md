@@ -4,7 +4,7 @@
 
 ## Description
 
-BrowseComp is an environment for evaluating web search reasoning capabilities. Based on OpenAI's [simple-evals](https://github.com/openai/simple-evals) benchmark, it contains 1,266 encrypted research questions that require multi-hop reasoning and cannot be answered without current web information. The environment provides built-in web search and URL fetching tools powered by Tavily.
+BrowseComp is an environment for evaluating web search reasoning capabilities. Based on OpenAI's [simple-evals](https://github.com/openai/simple-evals) benchmark, it contains 1,266 encrypted research questions that require multi-hop reasoning and cannot be answered without current web information. The environment provides built-in web search and URL fetching tools powered by OpenReward's backdated search corpus (backsearch), with the cutoff pinned to 2025-04-09, the day before BrowseComp's release, so search cannot surface answers published after it.
 
 ## Capabilities
 
@@ -47,11 +47,11 @@ Data is sourced from [OpenAI's BrowseComp benchmark](https://openai.com/index/br
 
 | Tool | Description |
 |------|-------------|
-| `web_search` | Search the web using Tavily (returns titles, URLs, snippets) |
-| `web_fetch` | Fetch full content from a URL (truncated to 8000 chars) |
+| `web_search` | Search the backsearch corpus as of 2025-04-09 (returns titles, URLs, snippets) |
+| `web_fetch` | Fetch an archived capture of a URL, extracting what the prompt asks for |
 | `submit_answer` | Submit answer with explanation, exact_answer, and confidence |
 
-Note that the `web_fetch` and `web_search` tools require Tavily, but are optional. If you want to use a different provider for search you can exclude these tools and use external tools instead.
+Note that the `web_fetch` and `web_search` tools require an OpenReward API key, but are optional. If you want to use a different provider for search you can exclude these tools and use external tools instead.
 
 ## Time Horizon
 
@@ -72,9 +72,9 @@ This benchmark requires persistent multi-hop web navigation to find hard-to-find
 ## Other Environment Requirements
 
 - OpenAI API key required for LLM-based grading
-- Tavily API key required for web search
+- OpenReward API key required for web search (falls back to the server's `OPENREWARD_API_KEY`)
 
-Pass via `secrets={"openai_api_key": "...", "tavily_api_key": "..."}`.
+Pass via `secrets={"openai_api_key": "...", "api_key": "..."}`.
 
 ## Safety
 
