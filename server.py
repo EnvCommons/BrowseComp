@@ -9,7 +9,7 @@ and confidence. Answers are graded by an LLM judge (gpt-5-mini).
 import pandas as pd
 import openai
 from pydantic import BaseModel, Field
-from typing import Dict, List
+from typing import Dict, List, Literal
 
 from openreward.environments import Environment, JSONObject, Server, TextBlock, ToolOutput, tool
 
@@ -38,7 +38,7 @@ Consider:
 3. Is the answer factually accurate according to the correct answer provided?
 4. For numerical answers, allow small rounding differences
 
-Provide a brief analysis (2-3 sentences), then conclude with either "CORRECT" or "INCORRECT" on a new line."""
+Give a brief analysis (2-3 sentences), then your verdict: "CORRECT" or "INCORRECT"."""
 
 
 # Pydantic schemas for type safety
@@ -47,6 +47,12 @@ class BrowseCompTaskSpec(BaseModel):
     id: str
     problem: str
     answer: str
+
+
+class GraderVerdict(BaseModel):
+    """Structured grader output, so the verdict can't be misread from the analysis text"""
+    analysis: str
+    verdict: Literal["CORRECT", "INCORRECT"]
 
 
 class SubmitAnswerParams(BaseModel):
@@ -257,16 +263,19 @@ Important: Questions in this benchmark are deliberately challenging and often re
         )
 
         # Use gpt-5-mini as recommended for graders (cost-effective, reliable)
-        response = await self.openai_client.chat.completions.create(
+        response = await self.openai_client.chat.completions.parse(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": grader_prompt}],
+            response_format=GraderVerdict,
         )
 
-        grading_text = response.choices[0].message.content or ""
+        # Raise rather than score 0.0, so an ungradeable rollout is discarded, not counted wrong.
+        parsed = response.choices[0].message.parsed
+        if parsed is None:
+            raise RuntimeError(f"Grader returned no verdict: {response.choices[0].message.refusal!r}")
 
-        # Parse verdict (case-insensitive, must have CORRECT without INCORRECT)
-        upper_text = grading_text.upper()
-        is_correct = "CORRECT" in upper_text and "INCORRECT" not in upper_text
+        is_correct = parsed.verdict == "CORRECT"
+        grading_text = f"{parsed.analysis}\n\n{parsed.verdict}"
 
         return {
             "is_correct": is_correct,

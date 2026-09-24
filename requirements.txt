@@ -1,6 +1,6 @@
 fastapi>=0.115.12
 openreward>=0.1.158
 pandas
-openai
+openai>=1.92
 pydantic
 uvicorn>=0.34.3
