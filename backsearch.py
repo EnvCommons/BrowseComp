@@ -103,6 +103,15 @@ def _drop_content_mirror(out: ToolOutput) -> ToolOutput:
     )
 
 
+def _no_reward(out: ToolOutput) -> ToolOutput:
+    """Searching and fetching are not graded: report no reward rather than 0.0.
+
+    A 0.0 on every web call makes the harness's cumulative return a sum of zeros, and scorers
+    that prefer the cumulative over the terminal grade then report 0 for a correct answer.
+    """
+    return ToolOutput(blocks=out.blocks, metadata=out.metadata, reward=None, finished=out.finished)
+
+
 class BrowseCompBackSearch(BackSearchToolset):
     """BackSearchToolset with five adjustments, all backdating-preserving.
 
@@ -146,7 +155,7 @@ class BrowseCompBackSearch(BackSearchToolset):
             config=self.config,
             include_snippets=True,
         )
-        return to_tool_output(result, raise_on_fatal=True)
+        return _no_reward(to_tool_output(result, raise_on_fatal=True))
 
     @tool
     async def web_fetch(self, params: WebFetchParams) -> ToolOutput:
@@ -164,7 +173,7 @@ class BrowseCompBackSearch(BackSearchToolset):
                     break
             else:
                 result = _not_archived_result(params.url, as_of)
-        return _drop_content_mirror(to_tool_output(result, raise_on_fatal=True))
+        return _no_reward(_drop_content_mirror(to_tool_output(result, raise_on_fatal=True)))
 
 
 # The environment framework reads ``fn.__doc__`` for each tool's description.
