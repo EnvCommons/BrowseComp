@@ -36,7 +36,7 @@ This is a sparse reward environment with LLM-based grading:
 1. Agent receives a research question
 2. Agent uses `web_search` and `web_fetch` tools to gather information
 3. Agent submits answer with explanation, exact_answer, and confidence
-4. An LLM grader (gpt-5-mini) evaluates semantic equivalence
+4. An LLM grader (glm-5.2) evaluates semantic equivalence
 5. Binary reward: 1.0 if correct, 0.0 if incorrect
 
 ## Data

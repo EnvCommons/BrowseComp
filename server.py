@@ -3,7 +3,7 @@ BrowseComp Environment - Web search reasoning benchmark
 
 A single-turn evaluation environment with 1,266 encrypted questions requiring
 web search. Agents must research questions, then submit answers with explanation
-and confidence. Answers are graded by an LLM judge (gpt-5-mini).
+and confidence. Answers are graded by an LLM judge (glm-5.2).
 """
 
 import pandas as pd
@@ -130,7 +130,7 @@ class BrowseComp(Environment):
     1. Receives a research question requiring web search
     2. Uses web_search / web_fetch (backsearch, as of session start) to research
     3. Submits answer with explanation, exact_answer, and confidence
-    4. Answer is graded by gpt-5-mini comparing to correct answer
+    4. Answer is graded by glm-5.2 comparing to correct answer
     5. Receives reward (1.0 correct, 0.0 incorrect) and feedback
     """
 
@@ -252,7 +252,7 @@ Important: Questions in this benchmark are deliberately challenging and often re
         Returns:
             Dict with keys: is_correct, grading_response, confidence
 
-        Note: Uses gpt-5-mini
+        Note: Uses glm-5.2
         """
         grader_prompt = GRADER_PROMPT_TEMPLATE.format(
             question=self.config.problem,
@@ -262,9 +262,9 @@ Important: Questions in this benchmark are deliberately challenging and often re
             confidence=confidence
         )
 
-        # Use gpt-5-mini as recommended for graders (cost-effective, reliable)
+        # glm-5.2 on infer.gr.inc; the same GLM-5.2 fleet gpt-5-mini was aliased to there.
         response = await self.openai_client.chat.completions.parse(
-            model="gpt-5-mini",
+            model="glm-5.2",
             messages=[{"role": "user", "content": grader_prompt}],
             response_format=GraderVerdict,
         )
