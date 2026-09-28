@@ -2,15 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import random
+import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from openreward.environments import ToolOutput, tool
 from openreward.toolsets import BackSearchToolset
-from openreward.toolsets._web_common import WebFetchParams, WebSearchParams, to_tool_output
+from openreward.toolsets._web_common import (
+    SearchBackendUnavailable,
+    WebFetchParams,
+    WebSearchParams,
+    to_tool_output,
+)
 from openreward.tools.web import FETCH_DESCRIPTION, SEARCH_DESCRIPTION, WebToolResult, run_fetch, run_search
-from openreward.web_service import WebServiceConfig
+from openreward.web_service import (
+    AiohttpTransport,
+    RawResponse,
+    WebServiceClient,
+    WebServiceConfig,
+    WebTransport,
+    WebTransportError,
+)
 
 
 def today_utc_iso() -> str:
@@ -112,8 +129,141 @@ def _no_reward(out: ToolOutput) -> ToolOutput:
     return ToolOutput(blocks=out.blocks, metadata=out.metadata, reward=None, finished=out.finished)
 
 
+# Statuses that mean "the backend is busy or broken right now", not "this request is wrong".
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+# For fetch, only the service saying it is over capacity. A 5xx or timeout there is
+# usually about one page (slow, broken), and the agent can pick another result, so it
+# stays a soft error rather than stalling the call and then discarding the rollout.
+_CAPACITY_STATUSES = frozenset({429, 503})
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def _retry_after_s(headers: Mapping[str, str]) -> Optional[float]:
+    """``Retry-After`` as seconds, or None. Only the delta-seconds form is parsed; the
+    web service never sends an HTTP-date."""
+    for k, v in headers.items():
+        if k.lower() == "retry-after":
+            try:
+                return max(0.0, float(v))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _is_degraded(resp: RawResponse) -> bool:
+    """A 200 search whose body says some requested corpora contributed nothing."""
+    if resp.status != 200:
+        return False
+    try:
+        body = json.loads(resp.text)
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("degraded") is True
+
+
+class PatientTransport:
+    """Wraps the SDK transport so a busy or partially failing backend is waited out, not
+    scored.
+
+    The SDK retries 429/5xx three times over about three seconds and ignores
+    ``Retry-After``, then hands the agent a soft "web-service-error". The agent carries
+    on without results and the trial is graded as though it had searched. Under load
+    shedding that turns an overloaded search service into wrong answers. The search
+    service also returns 200 with ``degraded: true`` when some corpora timed out; the SDK
+    drops that field, so a search over one corpus of six reads as a full one.
+
+    Searches are retried on 429, 5xx, transport errors and ``degraded``; every other
+    request (fetch, domain preflight) only on 429/503, since its other failures are
+    usually about one page. Retries use capped,
+    jittered exponential backoff, never waiting less than ``Retry-After``, until
+    ``budget_s`` runs out. It then records ``gave_up`` and returns the last response
+    unchanged, and every later request on this transport returns immediately. The
+    toolset checks ``gave_up`` after the call and raises ``SearchBackendUnavailable``,
+    so the rollout ends as an environment fault and is discarded rather than scored.
+
+    One instance per tool call: ``gave_up`` must describe that call only, and the
+    short-circuit stops the SDK's own retry loop from spending the budget again.
+    """
+
+    def __init__(
+        self,
+        inner: WebTransport,
+        *,
+        search_url: str,
+        budget_s: float,
+        base_s: float = 2.0,
+        cap_s: float = 60.0,
+        sleep=None,
+        clock=None,
+    ) -> None:
+        self._inner = inner
+        self._search_url = search_url
+        self._budget_s = budget_s
+        self._base_s = base_s
+        self._cap_s = cap_s
+        # Resolved per call, not bound at import, so tests can patch asyncio.sleep.
+        self._sleep = sleep or (lambda s: asyncio.sleep(s))
+        self._clock = clock or time.monotonic
+        self._last: Optional[RawResponse] = None
+        self.gave_up: Optional[str] = None
+        self.retries = 0
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> RawResponse:
+        if self.gave_up is not None:
+            if self._last is None:
+                raise WebTransportError(self.gave_up)
+            return self._last
+        deadline = self._clock() + self._budget_s
+        attempt = 0
+        while True:
+            error: Optional[WebTransportError] = None
+            resp: Optional[RawResponse] = None
+            is_search = url == self._search_url
+            try:
+                resp = await self._inner.request(method, url, **kwargs)
+            except WebTransportError as e:
+                if not is_search:
+                    raise
+                error = e
+            if resp is not None:
+                self._last = resp
+                if resp.status in (_RETRY_STATUSES if is_search else _CAPACITY_STATUSES):
+                    reason = f"HTTP {resp.status}"
+                elif is_search and _is_degraded(resp):
+                    reason = "degraded search (corpora missing)"
+                else:
+                    return resp
+            else:
+                reason = f"transport error: {error}"
+
+            # Equal jitter: half fixed, half random, so a crowd of rollouts spreads out
+            # without any of them retrying almost immediately.
+            step = min(self._cap_s, self._base_s * (2 ** attempt))
+            delay = step / 2 + random.uniform(0, step / 2)
+            hint = _retry_after_s(resp.headers) if resp is not None else None
+            if hint is not None:
+                delay = max(delay, hint)
+            if self._clock() + delay > deadline:
+                self.gave_up = f"{reason}; still failing after {self.retries} retries"
+                if resp is None:
+                    raise error  # type: ignore[misc]
+                return resp
+            await self._sleep(delay)
+            attempt += 1
+            self.retries += 1
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 class BrowseCompBackSearch(BackSearchToolset):
-    """BackSearchToolset with five adjustments, all backdating-preserving.
+    """BackSearchToolset with six adjustments, all backdating-preserving.
 
     First, the session's secrets (``api_key`` / ``openreward_api_key``) are
     consulted when building the web-service config, falling back to the process
@@ -129,6 +279,11 @@ class BrowseCompBackSearch(BackSearchToolset):
     cosmetic respellings of the URL (see ``_url_variants``), and a genuine miss
     returns an actionable ``page-not-archived`` message. Fifth, the redundant
     ``metadata["content"]`` mirror is dropped (see ``_drop_content_mirror``).
+    Sixth, every call goes through a ``PatientTransport``: an overloaded or degraded
+    backend (for fetch, only an overloaded one) is waited out for up to ``BROWSECOMP_WEB_RETRY_BUDGET_S``
+    (default 600 s) per tool call, and if it has not recovered by then the call
+    raises ``SearchBackendUnavailable`` so the rollout is discarded, not graded
+    on missing search results.
 
     The cutoff still resolves through the parent's ``_current_as_of``
     (``env.web_as_of``, the UTC date the session was created) on every call.
@@ -144,35 +299,73 @@ class BrowseCompBackSearch(BackSearchToolset):
             secrets = getattr(env, "search_secrets", None)
             kwargs["config"] = WebServiceConfig.from_env(secrets)
         super().__init__(env, **kwargs)
+        self.retry_budget_s = _float_env("BROWSECOMP_WEB_RETRY_BUDGET_S", 600.0)
+        self._inner_transport = AiohttpTransport  # overridable in tests
+
+    def _patient_client(self) -> tuple[Optional[WebServiceClient], Optional[PatientTransport]]:
+        """A client for ONE tool call, and its transport. (None, None) when no key is
+        configured, so the SDK's own "not-configured" fatal path runs unchanged."""
+        if self.config is None:
+            return None, None
+        transport = PatientTransport(
+            self._inner_transport(),
+            search_url=self.config.search_url,
+            budget_s=self.retry_budget_s,
+        )
+        return WebServiceClient(self.config, transport=transport), transport
+
+    @staticmethod
+    def _raise_if_gave_up(transport: Optional[PatientTransport]) -> None:
+        if transport is not None and transport.gave_up is not None:
+            raise SearchBackendUnavailable(
+                "provider-unavailable",
+                f"Web service unavailable: {transport.gave_up}. The rollout is an "
+                f"infrastructure failure, not an answer.",
+            )
 
     @tool
     async def web_search(self, params: WebSearchParams) -> ToolOutput:
-        result = await run_search(
-            query=params.query,
-            as_of=self._current_as_of(),
-            allowed_domains=params.allowed_domains,
-            blocked_domains=params.blocked_domains,
-            config=self.config,
-            include_snippets=True,
-        )
+        client, transport = self._patient_client()
+        try:
+            result = await run_search(
+                query=params.query,
+                as_of=self._current_as_of(),
+                allowed_domains=params.allowed_domains,
+                blocked_domains=params.blocked_domains,
+                config=self.config,
+                client=client,
+                include_snippets=True,
+            )
+        finally:
+            if client is not None:
+                await client.aclose()
+        self._raise_if_gave_up(transport)
         return _no_reward(to_tool_output(result, raise_on_fatal=True))
 
     @tool
     async def web_fetch(self, params: WebFetchParams) -> ToolOutput:
         as_of = self._current_as_of()
-        result = await run_fetch(
-            url=params.url, prompt=params.prompt, as_of=as_of, config=self.config
-        )
-        if _is_not_archived(result):
-            for candidate in _url_variants(params.url):
-                retry = await run_fetch(
-                    url=candidate, prompt=params.prompt, as_of=as_of, config=self.config
-                )
-                if retry.ok:
-                    result = retry
-                    break
-            else:
-                result = _not_archived_result(params.url, as_of)
+        client, transport = self._patient_client()
+        try:
+            result = await run_fetch(
+                url=params.url, prompt=params.prompt, as_of=as_of, config=self.config,
+                client=client,
+            )
+            if _is_not_archived(result):
+                for candidate in _url_variants(params.url):
+                    retry = await run_fetch(
+                        url=candidate, prompt=params.prompt, as_of=as_of,
+                        config=self.config, client=client,
+                    )
+                    if retry.ok:
+                        result = retry
+                        break
+                else:
+                    result = _not_archived_result(params.url, as_of)
+        finally:
+            if client is not None:
+                await client.aclose()
+        self._raise_if_gave_up(transport)
         return _no_reward(_drop_content_mirror(to_tool_output(result, raise_on_fatal=True)))
 
 
