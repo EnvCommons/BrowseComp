@@ -6,10 +6,12 @@ web search. Agents must research questions, then submit answers with explanation
 and confidence. Answers are graded by an LLM judge (glm-5.2).
 """
 
+import re
+
 import pandas as pd
 import openai
 from pydantic import BaseModel, Field
-from typing import Dict, List, Literal
+from typing import Dict, List, Optional
 
 from openreward.environments import Environment, JSONObject, Server, TextBlock, ToolOutput, tool
 
@@ -38,7 +40,21 @@ Consider:
 3. Is the answer factually accurate according to the correct answer provided?
 4. For numerical answers, allow small rounding differences
 
-Give a brief analysis (2-3 sentences), then your verdict: "CORRECT" or "INCORRECT"."""
+Give a brief analysis (2-3 sentences), then end with a final line that is exactly "verdict: CORRECT" or "verdict: INCORRECT"."""
+
+# Only a whole line counts, so "NOT CORRECT" or "incorrect" inside the analysis can't be read as the verdict.
+VERDICT_RE = re.compile(r"^\s*verdict:\s*(CORRECT|INCORRECT)\s*$", re.IGNORECASE | re.MULTILINE)
+
+# A normal grade is well under 1k tokens including reasoning; the cap bounds a degenerate generation.
+GRADER_MAX_TOKENS = 4096
+GRADER_TIMEOUT_S = 180
+GRADER_ATTEMPTS = 3
+
+
+def _parse_verdict(text: str) -> Optional[str]:
+    """The last "verdict: ..." line, upper-cased, or None if the grader wrote none."""
+    matches = VERDICT_RE.findall(text)
+    return matches[-1].upper() if matches else None
 
 
 # Pydantic schemas for type safety
@@ -47,12 +63,6 @@ class BrowseCompTaskSpec(BaseModel):
     id: str
     problem: str
     answer: str
-
-
-class GraderVerdict(BaseModel):
-    """Structured grader output, so the verdict can't be misread from the analysis text"""
-    analysis: str
-    verdict: Literal["CORRECT", "INCORRECT"]
 
 
 class SubmitAnswerParams(BaseModel):
@@ -167,7 +177,10 @@ class BrowseComp(Environment):
         # the archive filters by capture date and has almost no general web before mid-2025.
         self.web_as_of = today_utc_iso()
 
-        self.openai_client = openai.AsyncClient(api_key=openai_api_key)
+        # Retries live in _grade_answer so every attempt is capped and counted.
+        self.openai_client = openai.AsyncClient(
+            api_key=openai_api_key, timeout=GRADER_TIMEOUT_S, max_retries=0
+        )
 
     @classmethod
     def list_splits(cls) -> list[str]:
@@ -262,20 +275,29 @@ Important: Questions in this benchmark are deliberately challenging and often re
             confidence=confidence
         )
 
-        # glm-5.2 on infer.gr.inc; the same GLM-5.2 fleet gpt-5-mini was aliased to there.
-        response = await self.openai_client.chat.completions.parse(
-            model="glm-5.2",
-            messages=[{"role": "user", "content": grader_prompt}],
-            response_format=GraderVerdict,
-        )
+        # Plain text on purpose: under a JSON schema glm-5.2 could loop on whitespace until the context filled.
+        failures: List[str] = []
+        for _ in range(GRADER_ATTEMPTS):
+            try:
+                response = await self.openai_client.chat.completions.create(
+                    model="glm-5.2",
+                    messages=[{"role": "user", "content": grader_prompt}],
+                    max_tokens=GRADER_MAX_TOKENS,
+                )
+            except openai.APIError as e:
+                failures.append(f"{type(e).__name__}: {e}")
+                continue
+            choice = response.choices[0]
+            grading_text = choice.message.content or ""
+            verdict = _parse_verdict(grading_text) if choice.finish_reason == "stop" else None
+            if verdict is not None:
+                break
+            failures.append(f"finish_reason={choice.finish_reason}, no verdict line in {grading_text[-200:]!r}")
+        else:
+            # Raise rather than score 0.0, so an ungradeable rollout is discarded, not counted wrong.
+            raise RuntimeError(f"Grader gave no verdict in {GRADER_ATTEMPTS} attempts: {failures}")
 
-        # Raise rather than score 0.0, so an ungradeable rollout is discarded, not counted wrong.
-        parsed = response.choices[0].message.parsed
-        if parsed is None:
-            raise RuntimeError(f"Grader returned no verdict: {response.choices[0].message.refusal!r}")
-
-        is_correct = parsed.verdict == "CORRECT"
-        grading_text = f"{parsed.analysis}\n\n{parsed.verdict}"
+        is_correct = verdict == "CORRECT"
 
         return {
             "is_correct": is_correct,
