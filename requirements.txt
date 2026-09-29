@@ -1,5 +1,5 @@
 fastapi>=0.115.12
-openreward>=0.1.158
+openreward>=0.1.161.dev0
 pandas
 openai>=1.92
 pydantic
