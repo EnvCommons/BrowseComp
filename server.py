@@ -134,6 +134,10 @@ ALL_DATA = load_browsecomp_data()
 
 
 class BrowseComp(Environment):
+    # Search/fetch backend: None means BROWSECOMP_SEARCH_PROVIDER decides (default backsearch).
+    # BrowseCompSerpApi pins "serpapi" so an eval can pick it as a variant (see below).
+    SEARCH_PROVIDER: Optional[str] = None
+
     """
     BrowseComp environment: encrypted web research questions with LLM grading.
 
@@ -176,10 +180,10 @@ class BrowseComp(Environment):
 
         # Opt-in SerpAPI provider (live_web.py): refuse the session up front if it was
         # asked for without a usable key, rather than discarding every rollout later.
-        if (os.environ.get("BROWSECOMP_SEARCH_PROVIDER") or "").strip().lower() not in ("", "backsearch"):
+        if (self.SEARCH_PROVIDER or os.environ.get("BROWSECOMP_SEARCH_PROVIDER") or "").strip().lower() not in ("", "backsearch"):
             from live_web import resolve_serpapi_key, search_provider
 
-            if search_provider() == "serpapi":
+            if (self.SEARCH_PROVIDER or search_provider()) == "serpapi":
                 key, why = resolve_serpapi_key(secrets)
                 if not key:
                     raise ValueError(f"BROWSECOMP_SEARCH_PROVIDER=serpapi but {why}.")
@@ -371,6 +375,16 @@ Your Answer: {params.exact_answer}"""
         )
 
 
+class BrowseCompSerpApi(BrowseComp):
+    """BrowseComp with web_search on SerpAPI (Google) and web_fetch live, for the search-provider
+    comparison. Same tasks, prompt, tools and grader; only the search/fetch backend differs.
+    A separate class so an eval selects it as a variant and its results get their own cell.
+    The key still arrives as SERPAPI_API_KEY (env_overrides): the secret proxy only rewrites
+    headers and SerpAPI takes the key as a query parameter."""
+
+    SEARCH_PROVIDER = "serpapi"
+
+
 if __name__ == "__main__":
     # Start the environment server
-    Server([BrowseComp]).run()
+    Server([BrowseComp, BrowseCompSerpApi]).run()
