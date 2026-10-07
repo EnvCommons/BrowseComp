@@ -306,11 +306,13 @@ class BrowseCompBackSearch(BackSearchToolset):
         # Opt-in live provider (BROWSECOMP_SEARCH_PROVIDER=serpapi): SerpAPI search plus
         # live fetch, see live_web.py. None, the default, leaves both tools on backsearch.
         self._live: Optional[Any] = None
-        if (os.environ.get("BROWSECOMP_SEARCH_PROVIDER") or "").strip().lower() not in ("", "backsearch"):
+        pinned = getattr(env, "SEARCH_PROVIDER", None)  # BrowseCompSerpApi pins "serpapi"
+        if (pinned or os.environ.get("BROWSECOMP_SEARCH_PROVIDER") or "").strip().lower() not in ("", "backsearch"):
             # Imported only when asked for, so the default path loads nothing new.
             from live_web import LiveWeb, search_provider
 
-            search_provider()  # raises on an unknown value: never fall back silently
+            if not pinned:
+                search_provider()  # raises on an unknown value: never fall back silently
             task = getattr(env, "config", None)
             self._live = LiveWeb(
                 secrets=getattr(env, "search_secrets", None),

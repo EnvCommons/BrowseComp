@@ -508,3 +508,37 @@ def test_store_from_url():
     assert isinstance(gcs, web_cache.GCSStore) and gcs.bucket == "bkt" and gcs.prefix == "some/prefix"
     with pytest.raises(ValueError):
         web_cache.store_from_url("s3://nope")
+
+
+def test_serpapi_variant_class_pins_the_provider_without_the_env_var(monkeypatch):
+    # The eval selects BrowseCompSerpApi as a variant; it must not depend on the env var.
+    monkeypatch.delenv("BROWSECOMP_SEARCH_PROVIDER", raising=False)
+    env = type("E", (), {"SEARCH_PROVIDER": "serpapi", "search_secrets": {"serpapi_api_key": KEY},
+                         "config": type("C", (), {"problem": QUESTION, "id": "browsecomp_9"})()})()
+    ts = _toolset(env)
+    assert isinstance(ts._live, LiveWeb) and ts._live.task_id == "browsecomp_9"
+    http = FakeHttp({live_web.SERPAPI_URL: [resp(200, SERP_BODY)]})
+    ts._live.http = http
+    ts._live.search_cache = TwoLevelCache("s", store=None, ttl_s=60, mem_bytes=1 << 20)
+    out = run(ts.web_search(WebSearchParams(query="who wrote hamlet")))
+    assert out.metadata["provider"] == "serpapi" and http.n(live_web.SERPAPI_URL) == 1
+
+
+def test_default_class_keeps_backsearch_without_the_env_var(monkeypatch):
+    monkeypatch.delenv("BROWSECOMP_SEARCH_PROVIDER", raising=False)
+    env = type("E", (), {"SEARCH_PROVIDER": None, "search_secrets": {},
+                         "config": type("C", (), {"problem": QUESTION, "id": "browsecomp_9"})()})()
+    assert _toolset(env)._live is None
+
+
+def test_server_registers_the_serpapi_variant():
+    # Parsed, not imported: importing server.py loads the question CSV.
+    import ast, pathlib
+    tree = ast.parse(pathlib.Path(__file__).with_name("server.py").read_text())
+    classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+    variant = classes["BrowseCompSerpApi"]
+    assert [b.id for b in variant.bases] == ["BrowseComp"]
+    pinned = [a for a in variant.body if isinstance(a, ast.Assign) and a.targets[0].id == "SEARCH_PROVIDER"]
+    assert pinned and pinned[0].value.value == "serpapi"
+    served = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Server"]
+    assert [e.id for e in served[0].args[0].elts] == ["BrowseComp", "BrowseCompSerpApi"]
