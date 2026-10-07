@@ -290,8 +290,10 @@ class BrowseCompBackSearch(BackSearchToolset):
     No ``corpus`` is pinned, so the backend fans out over its default corpora
     (news, SEC filings, Wikipedia, general web, live captures, arXiv) — naming
     corpora *replaces* that set rather than extending it. Unlike the SDK's
-    swappable web toolset, this one cannot be switched to a live-web provider
-    by an environment variable.
+    swappable web toolset, the SDK's backend switch does not apply here. The one
+    opt-in exception is ``BROWSECOMP_SEARCH_PROVIDER=serpapi`` (see ``live_web.py``),
+    which moves both tools to SerpAPI search plus a live fetcher for a provider
+    comparison; unset, every call takes exactly the path described above.
     """
 
     def __init__(self, env: Optional[Any] = None, **kwargs: Any) -> None:
@@ -301,6 +303,21 @@ class BrowseCompBackSearch(BackSearchToolset):
         super().__init__(env, **kwargs)
         self.retry_budget_s = _float_env("BROWSECOMP_WEB_RETRY_BUDGET_S", 600.0)
         self._inner_transport = AiohttpTransport  # overridable in tests
+        # Opt-in live provider (BROWSECOMP_SEARCH_PROVIDER=serpapi): SerpAPI search plus
+        # live fetch, see live_web.py. None, the default, leaves both tools on backsearch.
+        self._live: Optional[Any] = None
+        if (os.environ.get("BROWSECOMP_SEARCH_PROVIDER") or "").strip().lower() not in ("", "backsearch"):
+            # Imported only when asked for, so the default path loads nothing new.
+            from live_web import LiveWeb, search_provider
+
+            search_provider()  # raises on an unknown value: never fall back silently
+            task = getattr(env, "config", None)
+            self._live = LiveWeb(
+                secrets=getattr(env, "search_secrets", None),
+                question=getattr(task, "problem", None),
+                task_id=getattr(task, "id", None),
+                preapproved_hosts=self.config.preapproved_hosts if self.config else (),
+            )
 
     def _patient_client(self) -> tuple[Optional[WebServiceClient], Optional[PatientTransport]]:
         """A client for ONE tool call, and its transport. (None, None) when no key is
@@ -325,6 +342,8 @@ class BrowseCompBackSearch(BackSearchToolset):
 
     @tool
     async def web_search(self, params: WebSearchParams) -> ToolOutput:
+        if self._live is not None:
+            return await self._live.search(params.query, params.allowed_domains, params.blocked_domains)
         client, transport = self._patient_client()
         try:
             result = await run_search(
@@ -344,6 +363,8 @@ class BrowseCompBackSearch(BackSearchToolset):
 
     @tool
     async def web_fetch(self, params: WebFetchParams) -> ToolOutput:
+        if self._live is not None:
+            return await self._live.fetch(params.url, params.prompt)
         as_of = self._current_as_of()
         client, transport = self._patient_client()
         try:
