@@ -408,6 +408,7 @@ class _Attempt:
     body: Optional[dict[str, Any]] = None  # successful SerpAPI JSON (may be an empty-result body)
     soft: Optional[WebToolResult] = None   # agent-recoverable error
     requests: int = 0
+    retry_reasons: list[str] = field(default_factory=list)  # why each extra request was sent
 
 
 # --------------------------------------------------------------------------- #
@@ -622,6 +623,10 @@ class LiveWeb:
                     f"SerpAPI unavailable: {reason}; still failing after {out.requests} requests. "
                     f"The rollout is an infrastructure failure, not an answer.",
                 )
+            # Every retry is a billed SerpAPI request, so say why it happened.
+            out.retry_reasons.append(reason)
+            self._emit({"event": "serpapi_retry", "attempt": out.requests, "reason": reason,
+                        "delay_s": round(delay, 1)})
             await self._sleep(delay)
             attempt_no += 1
 
@@ -642,6 +647,7 @@ class LiveWeb:
 
         body, level = await self.search_cache.get(key)
         requests = 0
+        retry_reasons: list[str] = []
         shared = False
         if body is None:
             async def make() -> _Attempt:
@@ -653,9 +659,11 @@ class LiveWeb:
             attempt, shared = await self.search_cache.single_flight(key, make)
             if not shared:
                 requests = attempt.requests
+                retry_reasons = list(attempt.retry_reasons)
             if attempt.soft is not None:
                 self._emit({"event": "serpapi_search", "query": query[:300], "cache": "miss",
-                            "serpapi_requests": requests, "result": attempt.soft.error_code})
+                            "serpapi_requests": requests, "retry_reasons": retry_reasons,
+                            "result": attempt.soft.error_code})
                 return self._output(attempt.soft, {"serpapi_requests": requests, "cache_hit": False,
                                                    "cache_key": key})
             body = attempt.body
@@ -683,8 +691,10 @@ class LiveWeb:
         )
         cache_label = level or ("inflight" if shared else "miss")
         self._emit({"event": "serpapi_search", "query": query[:300], "cache": cache_label,
-                    "serpapi_requests": requests, "hits": len(kept), "blocked": len(hits) - len(kept)})
-        return self._output(result, {"serpapi_requests": requests, "cache_hit": cache_hit,
+                    "serpapi_requests": requests, "retry_reasons": retry_reasons,
+                    "hits": len(kept), "blocked": len(hits) - len(kept)})
+        return self._output(result, {"serpapi_requests": requests, "retry_reasons": retry_reasons,
+                                     "cache_hit": cache_hit,
                                      "cache_level": cache_label, "cache_key": key})
 
     # ---- fetch --------------------------------------------------------------------

@@ -230,6 +230,29 @@ def test_429_and_5xx_are_retried_and_counted():
     assert t.now >= 3
 
 
+def test_each_retry_reason_is_recorded_and_logged(caplog):
+    # Retries are billed SerpAPI requests; the reason for every one must be visible.
+    t = FakeTime()
+    http = FakeHttp({live_web.SERPAPI_URL: [resp(429, {"error": "rate"}, {"Retry-After": "3"}), resp(503, ""),
+                                            HttpTransportError("timed out after 30s"), resp(200, SERP_BODY)]})
+    lw = make_live(http)
+    lw._sleep, lw._clock = t.sleep, t.clock
+    with caplog.at_level("INFO", logger="browsecomp.live_web"):
+        out = run(lw.search("who wrote hamlet"))
+    reasons = out.metadata["retry_reasons"]
+    assert len(reasons) == 3 and reasons[0].startswith("HTTP 429") and reasons[1].startswith("HTTP 503")
+    assert reasons[2].startswith("transport error") and "timed out" in reasons[2]
+    retry_lines = [r.getMessage() for r in caplog.records if '"serpapi_retry"' in r.getMessage()]
+    assert len(retry_lines) == 3 and '"attempt": 1' in retry_lines[0]
+    assert any('"retry_reasons"' in r.getMessage() and '"serpapi_search"' in r.getMessage() for r in caplog.records)
+    assert KEY not in caplog.text
+
+
+def test_no_retry_means_empty_reasons():
+    out = run(make_live(FakeHttp({live_web.SERPAPI_URL: [resp(200, SERP_BODY)]})).search("who wrote hamlet"))
+    assert out.metadata["retry_reasons"] == [] and out.metadata["serpapi_requests"] == 1
+
+
 def test_persistent_failure_raises_provider_unavailable():
     http = FakeHttp({live_web.SERPAPI_URL: [resp(503, "")]})
     with pytest.raises(SearchBackendUnavailable) as ei:
