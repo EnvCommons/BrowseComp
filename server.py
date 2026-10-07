@@ -6,6 +6,7 @@ web search. Agents must research questions, then submit answers with explanation
 and confidence. Answers are graded by an LLM judge (glm-5.2).
 """
 
+import os
 import re
 
 import pandas as pd
@@ -172,6 +173,16 @@ class BrowseComp(Environment):
 
         # Session credentials for backsearch (`api_key` / `openreward_api_key`).
         self.search_secrets = secrets
+
+        # Opt-in SerpAPI provider (live_web.py): refuse the session up front if it was
+        # asked for without a usable key, rather than discarding every rollout later.
+        if (os.environ.get("BROWSECOMP_SEARCH_PROVIDER") or "").strip().lower() not in ("", "backsearch"):
+            from live_web import resolve_serpapi_key, search_provider
+
+            if search_provider() == "serpapi":
+                key, why = resolve_serpapi_key(secrets)
+                if not key:
+                    raise ValueError(f"BROWSECOMP_SEARCH_PROVIDER=serpapi but {why}.")
 
         # Backsearch cutoff: the UTC date this session was created. Not pre-release:
         # the archive filters by capture date and has almost no general web before mid-2025.

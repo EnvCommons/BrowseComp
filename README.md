@@ -53,6 +53,10 @@ Data is sourced from [OpenAI's BrowseComp benchmark](https://openai.com/index/br
 
 Note that the `web_fetch` and `web_search` tools require an OpenReward API key, but are optional. If you want to use a different provider for search you can exclude these tools and use external tools instead.
 
+### Optional: SerpAPI search provider (provider comparison)
+
+Setting `BROWSECOMP_SEARCH_PROVIDER=serpapi` moves both web tools off backsearch: `web_search` makes one SerpAPI Google request per call, and `web_fetch` fetches pages live (trafilatura for HTML, pypdf for PDFs) with a Wayback Machine fallback when a site blocks the request. Neither tool falls back to backsearch. Output envelopes are unchanged. Search hits and fetches that would leak BrowseComp questions or answers are blocked and logged. A two-level cache (in-process, plus an optional persistent `BROWSECOMP_WEB_CACHE_URL` of the form `gs://bucket/prefix` or a directory) means a repeated query is paid for once. The SerpAPI key comes from `SERPAPI_API_KEY`, or from a `serpapi_api_key` secret when that secret holds the real value; a platform secret token cannot be used because SerpAPI only takes the key as a query parameter. See `live_web.py` and `web_cache.py` for every setting. Unset, the env behaves exactly as described above.
+
 ## Time Horizon
 
 Multi-turn. Agents can perform multiple web searches before submitting a final answer.

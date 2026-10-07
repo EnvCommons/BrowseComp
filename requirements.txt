@@ -4,3 +4,7 @@ pandas
 openai>=1.92
 pydantic
 uvicorn>=0.34.3
+# Opt-in SerpAPI/live-fetch provider only (live_web.py, web_cache.py); imported lazily.
+trafilatura>=1.12
+pypdf>=4
+google-auth
