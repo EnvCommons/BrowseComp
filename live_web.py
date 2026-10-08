@@ -251,6 +251,13 @@ DEFAULT_LEAK_URL_PATTERNS = (
     r"(?:^|//|\.)(?:github\.com|githubusercontent\.com|github\.io)/.*browse[\s_\-]*comp",
     # The upstream (encrypted) test-set CSV.
     r"browse_comp_test_set",
+    # Pages generated from other people's search queries. Their titles splice the answer onto
+    # the question's own clues ("malakwa bc to new orleans museum of art distance walking"),
+    # very likely built from agents running BrowseComp against Google. 7 of 150 sessions in the
+    # first SerpAPI run (nemotron b0, 2026-10-07) saw the answer on one; 6 were graded right.
+    r"/amphtml/news/articles/",                    # spam articles on hijacked domains
+    r"(?:^|//|\.)instagram\.com/popular/",         # Instagram's auto topic pages
+    r"(?:^|//|\.)tiktok\.com/discover/",           # TikTok's auto topic pages (same mechanism)
 )
 # A snippet this long that appears verbatim inside the question is a copy of it.
 DEFAULT_SNIPPET_OVERLAP_CHARS = 80
