@@ -47,9 +47,14 @@ Give a brief analysis (2-3 sentences), then end with a final line that is exactl
 VERDICT_RE = re.compile(r"^\s*verdict:\s*(CORRECT|INCORRECT)\s*$", re.IGNORECASE | re.MULTILINE)
 
 # A normal grade is well under 1k tokens including reasoning; the cap bounds a degenerate generation.
-GRADER_MAX_TOKENS = 4096
+# Token budget per attempt. The first is the long-standing 4096, so every answer that grades
+# today grades the same; a retry gets more room, because glm-5.2 sometimes spends the whole
+# budget reasoning and returns no content (finish_reason=length), which used to discard the
+# rollout after three identical tries.
+GRADER_MAX_TOKENS_PER_ATTEMPT = (4096, 16384, 32768)
+GRADER_MAX_TOKENS = GRADER_MAX_TOKENS_PER_ATTEMPT[0]
 GRADER_TIMEOUT_S = 180
-GRADER_ATTEMPTS = 3
+GRADER_ATTEMPTS = len(GRADER_MAX_TOKENS_PER_ATTEMPT)
 
 
 def _parse_verdict(text: str) -> Optional[str]:
@@ -292,12 +297,12 @@ Important: Questions in this benchmark are deliberately challenging and often re
 
         # Plain text on purpose: under a JSON schema glm-5.2 could loop on whitespace until the context filled.
         failures: List[str] = []
-        for _ in range(GRADER_ATTEMPTS):
+        for max_tokens in GRADER_MAX_TOKENS_PER_ATTEMPT:
             try:
                 response = await self.openai_client.chat.completions.create(
                     model="glm-5.2",
                     messages=[{"role": "user", "content": grader_prompt}],
-                    max_tokens=GRADER_MAX_TOKENS,
+                    max_tokens=max_tokens,
                 )
             except openai.APIError as e:
                 failures.append(f"{type(e).__name__}: {e}")
@@ -307,7 +312,8 @@ Important: Questions in this benchmark are deliberately challenging and often re
             verdict = _parse_verdict(grading_text) if choice.finish_reason == "stop" else None
             if verdict is not None:
                 break
-            failures.append(f"finish_reason={choice.finish_reason}, no verdict line in {grading_text[-200:]!r}")
+            failures.append(f"max_tokens={max_tokens} finish_reason={choice.finish_reason}, "
+                            f"no verdict line in {grading_text[-200:]!r}")
         else:
             # Raise rather than score 0.0, so an ungradeable rollout is discarded, not counted wrong.
             raise RuntimeError(f"Grader gave no verdict in {GRADER_ATTEMPTS} attempts: {failures}")

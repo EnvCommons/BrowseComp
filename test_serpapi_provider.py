@@ -108,8 +108,10 @@ def clean_env(monkeypatch):
               "BROWSECOMP_LEAK_URL_PATTERNS", "BROWSECOMP_LEAK_URL_PATTERNS_EXTRA"):
         monkeypatch.delenv(k, raising=False)
     web_cache.reset_caches()
+    live_web._SERPAPI_LAST_OK.clear()
     yield
     web_cache.reset_caches()
+    live_web._SERPAPI_LAST_OK.clear()
 
 
 # ---- switch -------------------------------------------------------------------------
@@ -542,3 +544,96 @@ def test_server_registers_the_serpapi_variant():
     assert pinned and pinned[0].value.value == "serpapi"
     served = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Server"]
     assert [e.id for e in served[0].args[0].elts] == ["BrowseComp", "BrowseCompSerpApi"]
+
+
+# ---- slow queries and the grader -----------------------------------------------------
+
+
+def test_timeouts_on_one_query_fail_softly_while_serpapi_answers_others():
+    http = FakeHttp({live_web.SERPAPI_URL: [resp(200, SERP_BODY)] + [HttpTransportError("timed out after 60s")]})
+    lw = make_live(http)
+    run(lw.search("who wrote hamlet"))  # a success marks SerpAPI as answering
+    out = run(lw.search("a slow query"))
+    assert "timed out 3 times in a row" in out.blocks[0].text
+    assert http.n(live_web.SERPAPI_URL) == 1 + live_web.SERPAPI_SOFT_TIMEOUTS
+    assert out.metadata["web_usage"]["search_soft_timeouts"] == 1
+    # Not cached: the same query is tried again next time.
+    http.routes[live_web.SERPAPI_URL] = [resp(200, SERP_BODY)]
+    http.counts.clear()
+    assert "Hamlet" in run(lw.search("a slow query")).blocks[0].text
+
+
+def test_timeouts_with_no_recent_success_are_still_an_outage():
+    http = FakeHttp({live_web.SERPAPI_URL: [HttpTransportError("timed out after 60s")]})
+    with pytest.raises(SearchBackendUnavailable) as ei:
+        run(make_live(http, budget_s=120).search("who wrote hamlet"))
+    assert ei.value.error_code == "provider-unavailable"
+    assert http.n(live_web.SERPAPI_URL) > live_web.SERPAPI_SOFT_TIMEOUTS
+
+
+def test_serpapi_timeout_is_60s_and_configurable(monkeypatch):
+    http = FakeHttp({live_web.SERPAPI_URL: [resp(200, SERP_BODY)]})
+    seen = []
+    orig = http.get
+
+    async def get(url, **kw):
+        seen.append(kw["timeout_s"])
+        return await orig(url, **kw)
+
+    http.get = get
+    run(make_live(http).search("q1"))
+    monkeypatch.setenv("BROWSECOMP_SERPAPI_TIMEOUT_S", "45")
+    run(make_live(http).search("q2"))
+    assert seen == [60.0, 45.0]
+
+
+class _FakeGrader:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.max_tokens = []
+        self.chat = self
+        self.completions = self
+
+    async def create(self, *, model, messages, max_tokens):
+        import types
+        self.max_tokens.append(max_tokens)
+        content, finish = self.replies.pop(0)
+        msg = types.SimpleNamespace(content=content)
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason=finish)])
+
+
+@pytest.fixture
+def server_mod(monkeypatch):
+    """server.py loads the question CSV at import; give it an empty one."""
+    import pathlib
+    import sys
+    import pandas as pd
+    monkeypatch.setattr(pd, "read_csv", lambda *a, **k: pd.DataFrame(columns=["problem", "answer", "canary"]))
+    real_exists = pathlib.Path.exists
+    monkeypatch.setattr(pathlib.Path, "exists",
+                        lambda self: True if self.name == "browse_comp_test_set.csv" else real_exists(self))
+    sys.modules.pop("server", None)
+    import server
+    yield server
+    sys.modules.pop("server", None)
+
+
+def _grade(server, replies):
+    import types
+    fake = _FakeGrader(replies)
+    env = types.SimpleNamespace(openai_client=fake,
+                                config=types.SimpleNamespace(problem="Q?", answer="Shakespeare"))
+    return fake, server.BrowseComp._grade_answer(env, "because", "Shakespeare", 90.0)
+
+
+def test_grader_retry_gets_a_bigger_budget(server_mod):
+    fake, coro = _grade(server_mod, [("", "length"), ("ok.\nverdict: CORRECT", "stop")])
+    assert run(coro)["is_correct"] is True
+    assert fake.max_tokens == [4096, 16384]
+
+
+def test_grader_first_attempt_unchanged_and_still_raises_after_all_attempts(server_mod):
+    fake, coro = _grade(server_mod, [("", "length")] * 3)
+    with pytest.raises(RuntimeError, match="no verdict in 3 attempts"):
+        run(coro)
+    assert fake.max_tokens == [4096, 16384, 32768]
