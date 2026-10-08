@@ -16,6 +16,7 @@ from openreward.tools.web import format_search_output
 from openreward.web_service import RawResponse, WebServiceConfig
 
 import live_web
+import web_archive
 import web_cache
 from backsearch import BrowseCompBackSearch
 from live_web import HttpResponse, HttpTransportError, LeakFilter, LiveWeb, map_serpapi
@@ -105,11 +106,14 @@ def make_live(http, *, tmp_path=None, ttl_s=3600.0, question=QUESTION, secrets=N
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     for k in ("BROWSECOMP_SEARCH_PROVIDER", "SERPAPI_API_KEY", "BROWSECOMP_WEB_CACHE_URL",
-              "BROWSECOMP_LEAK_URL_PATTERNS", "BROWSECOMP_LEAK_URL_PATTERNS_EXTRA"):
+              "BROWSECOMP_LEAK_URL_PATTERNS", "BROWSECOMP_LEAK_URL_PATTERNS_EXTRA",
+              "BROWSECOMP_WEB_ARCHIVE_URL", "BROWSECOMP_WEB_ARCHIVE_TAG"):
         monkeypatch.delenv(k, raising=False)
     web_cache.reset_caches()
+    web_archive.reset_archive()
     yield
     web_cache.reset_caches()
+    web_archive.reset_archive()
 
 
 # ---- switch -------------------------------------------------------------------------
@@ -542,3 +546,86 @@ def test_server_registers_the_serpapi_variant():
     assert pinned and pinned[0].value.value == "serpapi"
     served = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Server"]
     assert [e.id for e in served[0].args[0].elts] == ["BrowseComp", "BrowseCompSerpApi"]
+
+
+# ---- archive ------------------------------------------------------------------------
+
+
+def _archived(root, kind):
+    return sorted(p for p in (root / kind).rglob("*.json"))
+
+
+def test_archive_keeps_raw_serpapi_body_once_per_paid_search(tmp_path, monkeypatch):
+    monkeypatch.setenv("BROWSECOMP_WEB_ARCHIVE_URL", str(tmp_path / "arc"))
+    monkeypatch.setenv("BROWSECOMP_WEB_ARCHIVE_TAG", "run-x")
+    http = FakeHttp({live_web.SERPAPI_URL: [resp(200, SERP_BODY)]})
+    lw = make_live(http)
+
+    async def go():
+        out = await lw.search("who wrote hamlet")
+        again = await lw.search("who wrote hamlet")  # cache hit: not paid, not archived
+        await lw.archive.drain()
+        return out, again
+
+    out, again = run(go())
+    assert again.metadata["cache_hit"] is True
+    files = _archived(tmp_path / "arc", "serpapi")
+    assert len(files) == 1 and "/browsecomp_0/" in str(files[0])
+    doc = json.loads(files[0].read_text())
+    assert doc["search_id"] == "abc" and doc["tag"] == "run-x" and doc["query"] == "who wrote hamlet"
+    assert doc["body"]["organic_results"][2]["link"].endswith("BrowseComp-Plus")  # raw, before the leak filter
+    assert KEY not in files[0].read_text() and "api_key" not in doc["params"]
+    # The agent's view is unchanged by archiving.
+    plain = make_live(FakeHttp({live_web.SERPAPI_URL: [resp(200, SERP_BODY)]}))
+    plain.archive = None
+    assert out.blocks[0].text == run(plain.search("who wrote hamlet")).blocks[0].text
+
+
+def test_archive_keeps_fetch_outcome_and_raw_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("BROWSECOMP_WEB_ARCHIVE_URL", str(tmp_path / "arc"))
+    url = "https://blocked.example/page"
+    wb = f"https://web.archive.org/web/20240102030405id_/{url}"
+    http = FakeHttp({
+        url: [resp(403, "denied", {"Content-Type": "text/html"}, url=url)],
+        live_web.WAYBACK_PREFIX: [resp(200, HTML, {"Content-Type": "text/html"}, url=wb)],
+    })
+    lw = make_live(http)
+
+    async def go():
+        a = await asyncio.gather(lw.fetch(url, "p"), lw.fetch("https://other.example/x", "p"))
+        await lw.archive.drain()
+        return a
+
+    run(go())
+    docs = [json.loads(p.read_text()) for p in _archived(tmp_path / "arc", "fetch")]
+    assert len(docs) == 2
+    d = next(d for d in docs if d["url"] == url)
+    assert d["outcome"]["source"] == "wayback" and "Shakespeare" in d["outcome"]["text"]
+    assert [r["status"] for r in d["responses"]] == [403, 200]  # only this fetch's responses
+    raw = tmp_path / "arc" / "fetch-raw" / d["responses"][1]["body_sha256"][:2] / d["responses"][1]["body_sha256"]
+    assert raw.read_bytes() == HTML.encode()
+
+
+def test_archive_write_failure_never_fails_the_tool(monkeypatch):
+    class Broken:
+        def describe(self):
+            return "broken"
+
+        async def put(self, path, data, content_type="application/json"):
+            raise OSError("disk full")
+
+    url = "https://www.folger.edu/hamlet"
+    http = FakeHttp({url: [resp(200, HTML, {"Content-Type": "text/html"}, url=url)]})
+    lw = make_live(http)
+    lw.archive = web_archive.WebArchive(Broken())
+
+    async def go():
+        out = await lw.fetch(url, "p")
+        await lw.archive.drain()
+        return out
+
+    assert "Shakespeare" in run(go()).blocks[0].text
+
+
+def test_archive_off_by_default():
+    assert make_live(FakeHttp({})).archive is None

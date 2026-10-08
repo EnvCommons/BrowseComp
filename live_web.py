@@ -30,6 +30,7 @@ never logged, cached or returned; any text that could carry it is scrubbed.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import io
 import json
 import logging
@@ -56,6 +57,7 @@ from openreward.tools.web import (
 )
 from openreward.web_service import lookup_secret
 
+from web_archive import WebArchive, get_archive
 from web_cache import TwoLevelCache, cache_key, get_cache
 
 log = logging.getLogger("browsecomp.live_web")
@@ -179,6 +181,26 @@ class HttpClient(Protocol):
         max_bytes: int,
         allow_redirects: bool,
     ) -> HttpResponse: ...
+
+
+# Responses seen by the current fetch, for the archive. A context variable, not an
+# attribute, because one session can run several fetches at once.
+_FETCH_RESPONSES: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
+    "browsecomp_fetch_responses", default=None)
+
+
+class _RecordingHttp:
+    """Passes requests through and, inside an archived fetch, keeps each response."""
+
+    def __init__(self, inner: HttpClient) -> None:
+        self.inner = inner
+
+    async def get(self, url, **kw) -> HttpResponse:
+        r = await self.inner.get(url, **kw)
+        seen = _FETCH_RESPONSES.get()
+        if seen is not None:
+            seen.append(r)
+        return r
 
 
 class AiohttpClient:
@@ -521,6 +543,7 @@ class LiveWeb:
         http: Optional[HttpClient] = None,
         search_cache: Optional[TwoLevelCache] = None,
         fetch_cache: Optional[TwoLevelCache] = None,
+        archive: Any = "env",
         retry_budget_s: Optional[float] = None,
         sleep=None,
         clock=None,
@@ -529,7 +552,9 @@ class LiveWeb:
         self.leak = LeakFilter(question, task_id)
         self.task_id = task_id
         self.preapproved_hosts = frozenset(preapproved_hosts or ())
-        self.http: HttpClient = http or AiohttpClient()
+        self.http: HttpClient = _RecordingHttp(http or AiohttpClient())
+        # archive="env" reads BROWSECOMP_WEB_ARCHIVE_URL; None turns it off (tests).
+        self.archive: Optional[WebArchive] = get_archive() if archive == "env" else archive
         self.search_cache = search_cache or get_cache("serpapi-search")
         self.fetch_cache = fetch_cache or get_cache("live-fetch")
         self.retry_budget_s = (
@@ -648,6 +673,10 @@ class LiveWeb:
                 attempt = await self._serpapi_request(params)
                 if attempt.body is not None:
                     await self.search_cache.put(key, _strip_keys(attempt.body), material)
+                    if self.archive is not None:
+                        self.archive.serpapi(task_id=self.task_id, query=query, params=params,
+                                             cache_key=key, body=_strip_keys(attempt.body),
+                                             requests=attempt.requests)
                 return attempt
 
             attempt, shared = await self.search_cache.single_flight(key, make)
@@ -798,7 +827,16 @@ class LiveWeb:
         shared = False
         if outcome is None:
             async def make() -> dict[str, Any]:
-                o = await self._fetch_uncached(url, limit)
+                if self.archive is None:
+                    o = await self._fetch_uncached(url, limit)
+                else:
+                    seen: list = []
+                    token = _FETCH_RESPONSES.set(seen)
+                    try:
+                        o = await self._fetch_uncached(url, limit)
+                    finally:
+                        _FETCH_RESPONSES.reset(token)
+                    self.archive.fetch(task_id=self.task_id, url=url, outcome=o, responses=seen)
                 if o["kind"] == "page":
                     await self.fetch_cache.put(key, o, {"url": normalise_url(url)})
                 return o
