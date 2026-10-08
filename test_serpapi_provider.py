@@ -542,3 +542,51 @@ def test_server_registers_the_serpapi_variant():
     assert pinned and pinned[0].value.value == "serpapi"
     served = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Server"]
     assert [e.id for e in served[0].args[0].elts] == ["BrowseComp", "BrowseCompSerpApi"]
+
+
+# ---- JavaScript shells -------------------------------------------------------------
+
+
+def test_loading_shell_is_not_served_as_a_page():
+    url = "https://spam.example/amphtml/story/2026/10/07/x"
+    shell = "<html><body><div id=app>Loading</div><script src=/app.js></script></body></html>"
+    http = FakeHttp({url: [resp(200, shell, {"Content-Type": "text/html"}, url=url)],
+                     live_web.WAYBACK_PREFIX: [resp(404, "", url="https://web.archive.org/x")]})
+    out = run(make_live(http).fetch(url, "p"))
+    text = out.blocks[0].text
+    assert text.startswith("Error [fetch-error]") and "JavaScript" in text and "choose a different result" in text
+    assert out.metadata["web_usage"]["js_shell_pages"] == 1
+
+
+def test_shell_falls_back_to_a_real_wayback_capture():
+    url = "https://app.example/page"
+    shell = "<html><body>Loading</body></html>"
+    http = FakeHttp({url: [resp(200, shell, {"Content-Type": "text/html"}, url=url)],
+                     live_web.WAYBACK_PREFIX: [resp(200, HTML, {"Content-Type": "text/html"},
+                                                    url=f"https://web.archive.org/web/20250101000000id_/{url}")]})
+    out = run(make_live(http).fetch(url, "p"))
+    assert out.metadata["fetch_source"] == "wayback" and "Shakespeare" in out.blocks[0].text
+
+
+def test_wayback_shell_is_unusable_too():
+    url = "https://app.example/other"
+    shell = "<html><body>Loading</body></html>"
+    http = FakeHttp({url: [resp(200, shell, {"Content-Type": "text/html"}, url=url)],
+                     live_web.WAYBACK_PREFIX: [resp(200, shell, {"Content-Type": "text/html"},
+                                                    url=f"https://web.archive.org/web/20250101000000id_/{url}")]})
+    assert run(make_live(http).fetch(url, "p")).blocks[0].text.startswith("Error [fetch-error]")
+
+
+def test_js_required_notice_is_a_failed_fetch_but_long_pages_are_kept():
+    url = "https://scribd.example/doc"
+    notice = "<html><body><p>JavaScript is disabled in your browser. Please enable JavaScript to proceed.</p></body></html>"
+    http = FakeHttp({url: [resp(200, notice, {"Content-Type": "text/html"}, url=url)],
+                     live_web.WAYBACK_PREFIX: [resp(404, "", url="https://web.archive.org/x")]})
+    assert "requires JavaScript" in run(make_live(http).fetch(url, "p")).blocks[0].text
+    long_url = "https://ok.example/a"
+    paras = "".join(f"<p>Act {i}: Hamlet speaks with the ghost, then with Horatio, about the king.</p>"
+                    for i in range(30))
+    page = ("<html><body><article><h1>Hamlet by Shakespeare</h1>" + paras
+            + "<p>Please enable JavaScript for comments.</p></article></body></html>")
+    http = FakeHttp({long_url: [resp(200, page, {"Content-Type": "text/html"}, url=long_url)]})
+    assert "Shakespeare" in run(make_live(http).fetch(long_url, "p")).blocks[0].text
