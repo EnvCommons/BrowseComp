@@ -237,6 +237,7 @@ class WebUsage:
     wayback_served: int = 0
     fetch_cache_hits: int = 0
     blocked: int = 0
+    js_shell_pages: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -431,6 +432,26 @@ _CHALLENGE_MARKERS = (
 )
 _FALLBACK_STATUSES = frozenset({401, 403, 404, 408, 410, 429, 451})
 
+# A 200 page whose readable text is shorter than this is a JavaScript shell ("Loading", an
+# empty app root), not content: 15% of live fetches in the first SerpAPI runs (30% for
+# rl-r3-step150) returned just "Loading", and the agent read it as a page. Such a page is
+# treated like a failed fetch (Wayback, else a clear error), never served as content.
+MIN_PAGE_TEXT_CHARS = 64
+_JS_REQUIRED_MARKERS = (
+    "enable javascript", "javascript is disabled", "javascript is required", "requires javascript",
+    "you need to enable javascript", "please turn on javascript",
+)
+
+
+def _js_shell_reason(text: str, min_chars: int) -> Optional[str]:
+    """Why an HTML page's extracted text is not content, or None. PDFs never go through this."""
+    t = text.strip()
+    if len(t) < min_chars:
+        return "no readable text: the page builds its content with JavaScript" if t else "empty page"
+    if len(t) < 1000 and any(m in t.lower() for m in _JS_REQUIRED_MARKERS):
+        return "the page requires JavaScript"
+    return None
+
 _extract_sem: Optional[asyncio.Semaphore] = None
 
 
@@ -539,6 +560,7 @@ class LiveWeb:
         self.max_results = int(_float_env("BROWSECOMP_SERPAPI_MAX_RESULTS", SERPAPI_NUM))
         self.fetch_max_bytes = int(_float_env("BROWSECOMP_FETCH_MAX_BYTES", FETCH_MAX_BYTES))
         self.fetch_timeout_s = _float_env("BROWSECOMP_FETCH_TIMEOUT_S", FETCH_TIMEOUT_S)
+        self.min_page_chars = int(_float_env("BROWSECOMP_FETCH_MIN_TEXT_CHARS", MIN_PAGE_TEXT_CHARS))
         self._sleep = sleep or (lambda s: asyncio.sleep(s))
         self._clock = clock or time.monotonic
         self.usage = WebUsage()
@@ -725,8 +747,10 @@ class LiveWeb:
         if resp.status != 200:
             return None, f"no Wayback Machine capture (HTTP {resp.status})"
         text, problem = await _extract(resp, limit)
-        if problem or not text.strip():
-            return None, f"Wayback Machine capture unusable ({problem or 'empty'})"
+        problem = problem or (("empty" if not text.strip() else None) if _is_pdf(resp)
+                              else _js_shell_reason(text, self.min_page_chars))
+        if problem:
+            return None, f"Wayback Machine capture unusable ({problem})"
         m = re.search(r"/web/(\d{8})(\d{0,6})id_/", resp.url)
         archived = f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:8]}" if m else None
         return {"kind": "page", "text": text, "source": "wayback", "archived": archived}, ""
@@ -748,8 +772,11 @@ class LiveWeb:
                     reason = problem
                 elif _looks_like_challenge(resp, text):
                     reason = "bot challenge page"
-                elif not text.strip():
+                elif _is_pdf(resp) and not text.strip():
                     reason = "empty page"
+                elif not _is_pdf(resp) and (shell := _js_shell_reason(text, self.min_page_chars)) is not None:
+                    reason = shell
+                    self.usage.js_shell_pages += 1
                 else:
                     return {"kind": "page", "text": text, "source": "live"}
             elif resp.status in _FALLBACK_STATUSES or resp.status >= 500:
