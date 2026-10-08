@@ -63,7 +63,7 @@ def cache_key(material: dict[str, Any]) -> str:
 
 class PersistentStore(Protocol):
     async def get(self, path: str) -> Optional[bytes]: ...
-    async def put(self, path: str, data: bytes) -> None: ...
+    async def put(self, path: str, data: bytes, content_type: str = "application/json") -> None: ...
 
 
 class LocalDirStore:
@@ -82,7 +82,7 @@ class LocalDirStore:
         except FileNotFoundError:
             return None
 
-    async def put(self, path: str, data: bytes) -> None:
+    async def put(self, path: str, data: bytes, content_type: str = "application/json") -> None:
         p = self.root / path
 
         def _write() -> None:
@@ -164,33 +164,41 @@ class GCSStore:
                 raise RuntimeError(f"GCS read HTTP {resp.status}")
             return await resp.read()
 
-    async def put(self, path: str, data: bytes) -> None:
+    async def put(self, path: str, data: bytes, content_type: str = "application/json") -> None:
         token = await self._token()
         session = await self._http()
         url = (
             f"https://storage.googleapis.com/upload/storage/v1/b/{self.bucket}/o"
             f"?uploadType=media&name={quote(self._object(path), safe='')}"
         )
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": content_type}
         async with session.post(url, data=data, headers=headers) as resp:
             if resp.status not in (200, 201):
                 raise RuntimeError(f"GCS write HTTP {resp.status}")
 
 
-def store_from_url(url: Optional[str]) -> Optional[PersistentStore]:
-    """Build the persistent store named by ``url``; None for in-process only."""
+_FROM_ENV = object()
+
+
+def store_from_url(url: Optional[str], *, sa_json: Any = _FROM_ENV,
+                   env_name: str = "BROWSECOMP_WEB_CACHE_URL") -> Optional[PersistentStore]:
+    """Build the persistent store named by ``url``; None for in-process only.
+
+    ``sa_json`` defaults to BROWSECOMP_WEB_CACHE_GCS_SA_JSON; the archive passes its own."""
     url = (url or "").strip()
     if not url:
         return None
     if url.startswith("gs://"):
         parts = urlsplit(url)
-        return GCSStore(parts.netloc, parts.path, os.environ.get("BROWSECOMP_WEB_CACHE_GCS_SA_JSON"))
+        if sa_json is _FROM_ENV:
+            sa_json = os.environ.get("BROWSECOMP_WEB_CACHE_GCS_SA_JSON")
+        return GCSStore(parts.netloc, parts.path, sa_json)
     if url.startswith("file://"):
         return LocalDirStore(urlsplit(url).path)
     if url.startswith("/"):
         return LocalDirStore(url)
     raise ValueError(
-        f"BROWSECOMP_WEB_CACHE_URL must be gs://bucket/prefix, file:///dir or an absolute "
+        f"{env_name} must be gs://bucket/prefix, file:///dir or an absolute "
         f"path, got {url!r}"
     )
 
