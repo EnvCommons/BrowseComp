@@ -81,7 +81,12 @@ PROVIDERS = ("backsearch", "serpapi")
 SERPAPI_URL = "https://serpapi.com/search.json"
 SERPAPI_ENGINE = "google"
 SERPAPI_NUM = 10
-SERPAPI_TIMEOUT_S = 30.0
+SERPAPI_TIMEOUT_S = 60.0
+# A query whose requests keep timing out while SerpAPI is answering other queries is a slow
+# query, not an outage: after this many timeouts in a row it fails softly (the agent can retry
+# or rephrase) instead of ending the rollout. "Answering" = a success within SERPAPI_HEALTHY_S.
+SERPAPI_SOFT_TIMEOUTS = 3
+SERPAPI_HEALTHY_S = 300.0
 SERPAPI_MAX_BYTES = 5 * 1024 * 1024
 
 FETCH_TIMEOUT_S = 30.0
@@ -237,6 +242,7 @@ class WebUsage:
     wayback_served: int = 0
     fetch_cache_hits: int = 0
     blocked: int = 0
+    search_soft_timeouts: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -508,6 +514,16 @@ def _looks_like_challenge(resp: HttpResponse, text: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+# Process-wide time.monotonic() of the last successful SerpAPI response, shared by every
+# session in this env process.
+_SERPAPI_LAST_OK: dict[str, float] = {}
+
+
+def _serpapi_healthy() -> bool:
+    t = _SERPAPI_LAST_OK.get("t")
+    return t is not None and time.monotonic() - t <= SERPAPI_HEALTHY_S
+
+
 class LiveWeb:
     """SerpAPI search + live fetch for one session. Holds the session's counters."""
 
@@ -537,6 +553,7 @@ class LiveWeb:
             else _float_env("BROWSECOMP_WEB_RETRY_BUDGET_S", 600.0)
         )
         self.max_results = int(_float_env("BROWSECOMP_SERPAPI_MAX_RESULTS", SERPAPI_NUM))
+        self.serpapi_timeout_s = _float_env("BROWSECOMP_SERPAPI_TIMEOUT_S", SERPAPI_TIMEOUT_S)
         self.fetch_max_bytes = int(_float_env("BROWSECOMP_FETCH_MAX_BYTES", FETCH_MAX_BYTES))
         self.fetch_timeout_s = _float_env("BROWSECOMP_FETCH_TIMEOUT_S", FETCH_TIMEOUT_S)
         self._sleep = sleep or (lambda s: asyncio.sleep(s))
@@ -572,6 +589,7 @@ class LiveWeb:
                 "not-configured", f"SerpAPI search is not configured: {self._key_source}."
             )
         attempt_no = 0
+        timeouts_in_a_row = 0
         deadline = self._clock() + self.retry_budget_s
         out = _Attempt()
         while True:
@@ -582,14 +600,25 @@ class LiveWeb:
                 self.usage.serpapi_requests += 1
                 resp = await self.http.get(
                     SERPAPI_URL, params={**params, "api_key": self._key},
-                    timeout_s=SERPAPI_TIMEOUT_S, max_bytes=SERPAPI_MAX_BYTES, allow_redirects=True,
+                    timeout_s=self.serpapi_timeout_s, max_bytes=SERPAPI_MAX_BYTES, allow_redirects=True,
                 )
             except HttpTransportError as e:
                 reason = f"transport error: {self._scrub(str(e))}"
+                timeouts_in_a_row = timeouts_in_a_row + 1 if "timed out" in str(e) else 0
+                if timeouts_in_a_row >= SERPAPI_SOFT_TIMEOUTS and _serpapi_healthy():
+                    self.usage.search_soft_timeouts += 1
+                    out.soft = WebToolResult.error(
+                        "search-timeout",
+                        f"This search timed out {timeouts_in_a_row} times in a row. Try it again "
+                        f"or rephrase it.",
+                    )
+                    return out
             if resp is not None:
+                timeouts_in_a_row = 0
                 body = _body_json(resp)
                 err = self._scrub(str(body.get("error") or ""))
                 if resp.status == 200 and not err:
+                    _SERPAPI_LAST_OK["t"] = time.monotonic()
                     out.body = body
                     return out
                 if resp.status == 200 and _NO_RESULTS_RE.search(err):
