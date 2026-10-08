@@ -309,6 +309,21 @@ def test_leak_rules():
     assert lf.snippet_rule("breaks the fourth wall") is None  # too short to be a copy
 
 
+def test_query_spam_pages_are_blocked():
+    # Seen leaking answers in the first SerpAPI run: query-generated pages that splice the
+    # answer onto the question's clues.
+    lf = LeakFilter(QUESTION, patterns=list(live_web.DEFAULT_LEAK_URL_PATTERNS))
+    assert lf.url_rule("https://comandco.re/amphtml/news/articles/bv52ipw2jac7")
+    assert lf.url_rule("https://spreeboprint.de/amphtml/news/articles/hf4yhtz1rjy3")
+    assert lf.url_rule("https://www.instagram.com/popular/cerave-co-founder-university-education/")
+    assert lf.url_rule("https://www.tiktok.com/discover/malakwa-bc-museum")
+    # Ordinary pages on the same sites stay allowed.
+    assert lf.url_rule("https://www.instagram.com/p/C1a2b3c4d5/") is None
+    assert lf.url_rule("https://www.tiktok.com/@someone/video/123") is None
+    assert lf.url_rule("https://www.bbc.co.uk/news/articles/c0abc123") is None
+    assert lf.url_rule("https://example.com/amp/news/story-1") is None
+
+
 def test_leak_patterns_configurable(monkeypatch):
     monkeypatch.setenv("BROWSECOMP_LEAK_URL_PATTERNS_EXTRA", json.dumps([r"answers\.example"]))
     lf = LeakFilter(QUESTION)
